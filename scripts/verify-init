@@ -1,0 +1,100 @@
+#!/bin/bash
+set -e
+
+# verify-init: asserts that no init-plugin tokens remain in the codebase.
+# Run AFTER scripts/init-plugin to catch any missed replacements.
+#
+# Tokens handled by scripts/update-version (__VERSION__, __CHANGELOG__)
+# are intentionally excluded — they are stamped at release time.
+
+EXCLUDE_PATHS=(
+    ".git"
+    "node_modules"
+    "vendor"
+    "vendor-prefixed"
+)
+
+# Files that contain token patterns as search targets, not leftover placeholders.
+SELF_SCRIPTS=(
+    "init-plugin"
+    "verify-init"
+    "update-version"
+)
+
+STEP1_TOKENS=(
+    "__PHP_MIN_VERSION__"
+    "__PHP_DOCKER_VERSION__"
+    "__PHPSTAN_VERSION__"
+    "__WP_MIN_VERSION__"
+    "__TESTED_UP_TO__"
+    "__PHP_RUNNER_VERSION__"
+    "__PHP_CEILING_VERSION__"
+    "__WORDPRESS_PORT__"
+    "__PMA_PORT__"
+    "__MAILPIT_UI_PORT__"
+    "__MAILPIT_SMTP_PORT__"
+    "__DB_PORT__"
+    "__GITHUB_USERNAME__"
+    "__AUTHOR_NAME__"
+    "__AUTHOR_EMAIL__"
+    "__AUTHOR_URI__"
+    "__PLUGIN_URI__"
+    "__DESCRIPTION__"
+    "__LONG_DESCRIPTION__"
+)
+
+STEP2_TOKENS=(
+    "plugin-slug-placeholder"
+    "plugin_prefix_"
+    "PluginNamespacePlaceholder"
+    "PLUGIN_PREFIX_UPPER_"
+    "Plugin Name Placeholder"
+)
+
+EXCLUDES=()
+for d in "${EXCLUDE_PATHS[@]}"; do
+    EXCLUDES+=(-not -path "*/$d/*")
+done
+for s in "${SELF_SCRIPTS[@]}"; do
+    EXCLUDES+=(-not -name "$s")
+done
+
+errors=0
+
+check_tokens() {
+    local label="$1"
+    shift
+    local token_list=("$@")
+    for token in "${token_list[@]}"; do
+        matches=$(find . -type f "${EXCLUDES[@]}" -exec grep -l -F "$token" {} + 2>/dev/null || true)
+        if [ -n "$matches" ]; then
+            echo "  Token: $token"
+            echo "$matches" | while IFS= read -r f; do
+                echo "    $f"
+            done
+            errors=$((errors + 1))
+        fi
+    done
+}
+
+echo "--- Step 1 tokens (static config) ---"
+check_tokens "Step 1" "${STEP1_TOKENS[@]}"
+
+echo "--- Step 2 tokens (boilerplate names) ---"
+check_tokens "Step 2" "${STEP2_TOKENS[@]}"
+
+# PluginDependenciesPlaceholder: only expected to be replaced if scoping is used.
+if [ -f "scoper.inc.php" ] || [ -f "scripts/scope" ]; then
+    echo "--- Step 2 (scoping) ---"
+    check_tokens "Scoping" "PluginDependenciesPlaceholder"
+else
+    echo "--- Step 2 (scoping) — skipped (scoper not present) ---"
+fi
+
+echo ""
+if [ "$errors" -gt 0 ]; then
+    echo "FAILED: $errors token(s) still present after init-plugin."
+    exit 1
+else
+    echo "OK: No init-plugin tokens remain."
+fi

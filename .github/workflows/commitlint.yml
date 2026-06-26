@@ -1,0 +1,63 @@
+name: Commitlint
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  commitlint:
+    name: Validate Commit Messages
+    # Don't lint messages on draft PRs; they re-run on ready_for_review and on
+    # every push to main (which catches a bad squashed PR title).
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # On a PR, lint the full base..head range so bad messages are caught
+      # before merge (the push trigger only sees them after they reach main).
+      - name: Validate PR commits
+        if: github.event_name == 'pull_request'
+        run: |
+          npx commitlint \
+            --from "${{ github.event.pull_request.base.sha }}" \
+            --to "${{ github.event.pull_request.head.sha }}" \
+            --verbose
+
+      - name: Validate pushed commits
+        if: github.event_name == 'push'
+        run: |
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.event.after }}"
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || ! git rev-parse --quiet --verify "$BEFORE" >/dev/null; then
+            echo "Base SHA not in history (initial push or force push). Validating HEAD commit only."
+            npx commitlint --from "${AFTER}~1" --to "$AFTER" --verbose || npx commitlint --from "$AFTER" --to "$AFTER" --verbose
+          else
+            npx commitlint --from "$BEFORE" --to "$AFTER" --verbose
+          fi

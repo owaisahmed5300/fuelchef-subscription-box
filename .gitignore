@@ -1,0 +1,85 @@
+# --- OS ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+$RECYCLE.scripts/
+*.swp
+*.swo
+*~
+*.orig
+*.bak
+
+# --- IDE ---
+.idea/
+.vscode/
+.zed/
+*.sublime-project
+*.sublime-workspace
+.phpstorm.meta.php
+_nbproject/
+
+# --- PHP ---
+vendor/
+vendor-prefixed/
+
+# Scoping build artifacts + downloaded php-scoper phar (see scripts/scope)
+_deps/
+src-scoped/
+scripts/.cache/
+
+.php-cs-fixer.cache
+.php-cs-fixer.php
+.phpcs-cache
+.phpstan/
+
+# Local config overrides (.dist files are tracked; non-.dist are local)
+phpcs.xml
+phpstan.neon
+
+*.phar
+
+# --- Node ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- WordPress ---
+wp-content/
+wp-config.php
+wp-config-local.php
+wp-config.*.php
+wp-config.bak
+wp-config.bak.*
+*.sql
+*.sql.gz
+local/
+
+# --- Docker ---
+docker/.env
+
+# --- Build ---
+release/
+dist/
+build/
+*.zip
+*.tar.gz
+*.log
+
+# --- Claude ---
+.claude/
+
+# --- Build output ---
+readme.txt
+
+# --- Misc ---
+wp-plugin/
+repomix-output.md
+.env
+.env.local
+.env.*.local

@@ -1,0 +1,177 @@
+#!/bin/bash
+set -e
+
+# Stamps the release version into the plugin headers and generates readme.txt.
+#
+# Version source priority:
+#   1. First CLI argument   (e.g. ./scripts/update-version 1.2.3)
+#   2. $VERSION env var
+#   3. .version in package.json (legacy fallback)
+#
+# The release pipeline passes the git tag (release-please is the source of
+# truth); package.json carries no version field, so relying on it alone is a
+# no-op. A leading "v" (as in tags like v1.2.3) is stripped automatically.
+#
+# Host dependencies: jq (fallback version lookup) and python3 (CHANGELOG
+# parsing for readme generation) — both present on GitHub-hosted runners.
+
+version="${1:-${VERSION:-}}"
+
+if [ -z "$version" ]; then
+  version=$(jq -r '.version' package.json 2>/dev/null || echo "")
+fi
+
+# Strip an optional leading "v" from tag-style versions.
+version="${version#v}"
+
+if [ -z "$version" ] || [ "$version" = "null" ]; then
+  echo "Error: no version supplied via argument/\$VERSION and none found in package.json" >&2
+  exit 1
+fi
+
+echo "Updating tokens to version $version"
+
+replace_token() {
+  local file="$1"
+  local token="$2"
+  local value="$3"
+  if [ -f "$file" ]; then
+    sed -i -e "s/$token/$value/g" "$file"
+    echo "  $file: $token -> $value"
+  fi
+}
+
+# ──────────────────────────────────────────────
+# 1. Replace __VERSION__ in common WP files
+# ──────────────────────────────────────────────
+replace_token "functions.php" "__VERSION__" "$version"
+replace_token "style.css" "__VERSION__" "$version"
+
+# Determine plugin file from repo or directory name
+plugin_file=""
+if git rev-parse --show-toplevel >/dev/null 2>&1; then
+  repo_name=$(basename "$(git rev-parse --show-toplevel)")
+  [ -f "$repo_name.php" ] && plugin_file="$repo_name.php"
+fi
+if [ -z "$plugin_file" ]; then
+  dir_name=$(basename "$PWD")
+  [ -f "$dir_name.php" ] && plugin_file="$dir_name.php"
+fi
+if [ -n "$plugin_file" ]; then
+  replace_token "$plugin_file" "__VERSION__" "$version"
+fi
+
+# ──────────────────────────────────────────────
+# 2. Generate readme.txt from readme.txt.tpl
+# ──────────────────────────────────────────────
+if [ -f readme.txt.tpl ]; then
+  cp readme.txt.tpl readme.txt
+
+  replace_token "readme.txt" "__VERSION__" "$version"
+
+  tested_up_to="${TESTED_UP_TO:-7.0}"
+  replace_token "readme.txt" "__TESTED_UP_TO__" "$tested_up_to"
+
+  # Convert the CHANGELOG.md (Keep a Changelog / release-please format) into the
+  # WordPress readme "== Changelog ==" format and substitute it into the
+  # __CHANGELOG__ placeholder. Done entirely in Python because the changelog is
+  # multi-line and contains '/', '&' and '*' — characters that corrupt a
+  # `sed s///` replacement. If CHANGELOG.md is absent the placeholder is emptied.
+  CHANGELOG_SRC="CHANGELOG.md" python3 - "readme.txt" <<'PY'
+import os, re, sys
+
+readme_path = sys.argv[1]
+changelog_src = os.environ.get("CHANGELOG_SRC", "CHANGELOG.md")
+
+# Maps release-please section titles → compact WP readme labels.
+# Only sections listed here will be included in the WordPress readme.txt.
+# End users don't need to see internal CI, tests, or chore commits.
+type_labels = {
+    "Features": "Feature",
+    "Bug Fixes": "Fix",
+    "Performance Improvements": "Perf",
+    "Reverts": "Revert",
+}
+
+section = ""
+if os.path.exists(changelog_src):
+    with open(changelog_src, encoding="utf-8") as f:
+        content = f.read()
+
+    # Split on ANY "## heading" line, preserving the heading text via the
+    # capturing group. This handles both release-please output formats:
+    #
+    #   ## [1.0.0](https://github.com/.../compare/...) (2026-06-24)
+    #       ↑ linked format (most release-please release types)
+    #
+    #   ## 1.0.0 (2026-06-24)
+    #       ↑ unlinked format (release-type: simple — what this project uses)
+    #
+    # blocks layout after split:
+    #   blocks[0] = preamble ("# Changelog" header)
+    #   blocks[1] = heading line ("## 1.0.0 (date)")
+    #   blocks[2] = body text until next heading
+    #   blocks[3] = next heading …
+    blocks = re.split(r"^(## .+)$", content, flags=re.MULTILINE)
+
+    out = []
+    for i in range(1, len(blocks), 2):
+        heading = blocks[i]
+        body = blocks[i + 1] if i + 1 < len(blocks) else ""
+
+        # Extract the version token from the heading, stripping optional
+        # brackets and any trailing link/date:
+        #   "## [1.0.0](link) (date)"  → "1.0.0"
+        #   "## 1.0.0 (date)"          → "1.0.0"
+        #   "## [Unreleased]"           → "Unreleased"
+        m = re.match(r"^## \[?([^\]\s\(]+)", heading)
+        if not m:
+            continue
+        ver = m.group(1).strip()
+
+        if ver.lower() == "unreleased":
+            continue
+
+        items = []
+        current_label = None
+
+        # Walk line-by-line — avoids any DOTALL/MULTILINE regex ambiguity.
+        for line in body.splitlines():
+            # "### Features", "### Bug Fixes", etc.
+            heading_match = re.match(r"^### (.+)$", line)
+            if heading_match:
+                section_title = heading_match.group(1).strip()
+                current_label = type_labels.get(section_title)
+                continue
+
+            if current_label is None:
+                continue  # skip date/link lines and ignored sections (like Tests/CI)
+
+            stripped = line.strip()
+            if stripped.startswith(("* ", "- ")):
+                # Strip inline GitHub PR/commit links: "text ([#123](...)) ([abc]...)"
+                clean = re.sub(r"\s*\(\[.*?\]\(.*?\)\)", "", stripped[2:]).strip()
+                items.append(f"* {current_label}: {clean}")
+
+        if items:
+            out.append(f"= {ver} =")
+            out.extend(items)
+            out.append("")
+
+    section = "\n".join(out).strip()
+
+# Graceful fallback so __CHANGELOG__ is never silently empty in the shipped zip.
+if not section:
+    section = "This is the initial release. See CHANGELOG.md for future entries."
+
+with open(readme_path, encoding="utf-8") as f:
+    readme = f.read()
+
+with open(readme_path, "w", encoding="utf-8") as f:
+    f.write(readme.replace("__CHANGELOG__", section))
+PY
+
+  echo "  readme.txt generated from readme.txt.tpl"
+fi
+
+echo "Done."

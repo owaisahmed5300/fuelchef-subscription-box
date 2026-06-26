@@ -1,0 +1,18 @@
+#!/bin/bash
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
+
+if [ "${GITHUB_ACTIONS:-false}" != "true" ] && command -v docker >/dev/null 2>&1; then
+  exec ./scripts/docker npm "$@"
+fi
+
+command -v npm >/dev/null 2>&1 || {
+  echo "Error: Neither Docker (recommended) nor a local 'npm' command is available."
+  exit 1
+}
+
+exec npm "$@"

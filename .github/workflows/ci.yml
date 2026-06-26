@@ -1,0 +1,176 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: &ci_ignore
+      - "**.md"
+      - "docker/**"
+      - ".husky/**"
+      - ".editorconfig"
+      - ".gitattributes"
+      - "scripts/docker"
+      - "scripts/composer"
+      - "scripts/wp"
+      - ".github/workflows/commitlint.yml"
+      - ".github/dependabot.yml"
+      - "LICENSE"
+      # release-please commits/PRs only touch version metadata (CHANGELOG.md is
+      # already covered by **.md) — no need to re-run static analysis for them.
+      - ".release-please-manifest.json"
+
+  pull_request:
+    branches: [main]
+    # ready_for_review lets a draft kick off a full run the moment it's marked
+    # ready; until then the draft guard on the root jobs keeps minutes at zero.
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore: *ci_ignore
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-editorconfig:
+    name: Lint (EditorConfig)
+    # Skip draft PRs to save minutes; phpcs/phpstan need this job, so skipping it
+    # short-circuits the whole graph. Pushes (no pull_request payload) always run.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check EditorConfig
+        uses: editorconfig-checker/action-editorconfig-checker@v2
+        with:
+          version: "2.7.0"
+
+  validate-composer:
+    name: Validate composer
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # PHP version note: validate/phpcs run on the supported floor (8.1); phpstan
+      # additionally runs on the ceiling (8.5). Keep these in sync with composer.json.
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: 8.1
+          tools: composer
+          coverage: none
+      - name: Validate composer files
+        run: composer validate --strict
+
+  phpcs:
+    name: Code Style (PHP ${{ matrix.php-version }})
+    needs: [lint-editorconfig, validate-composer]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ["8.1"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          tools: composer
+          coverage: none
+      - name: Install dependencies
+        uses: ramsey/composer-install@v3
+        with:
+          composer-options: "--prefer-dist"
+      - name: Check PHPCS config
+        id: check_phpcs
+        run: |
+          if [ -f "phpcs.xml" ] || [ -f "phpcs.xml.dist" ]; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
+      - name: Run PHPCS on changed files (PR)
+        if: github.event_name == 'pull_request' && steps.check_phpcs.outputs.exists == 'true'
+        run: |
+          CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRT "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}" -- '*.php' || true)
+          if [[ -n "$CHANGED_FILES" ]]; then
+            echo "$CHANGED_FILES" | xargs -r ./vendor/bin/phpcs --report=checkstyle --no-cache > "phpcs-report-${{ matrix.php-version }}.xml" || true
+          else
+            echo '<checkstyle/>' > "phpcs-report-${{ matrix.php-version }}.xml"
+          fi
+
+      - name: Setup Reviewdog
+        if: github.event_name == 'pull_request' && matrix.php-version == '8.1' && steps.check_phpcs.outputs.exists == 'true'
+        uses: reviewdog/action-setup@v1
+
+      - name: Reviewdog
+        if: github.event_name == 'pull_request' && matrix.php-version == '8.1' && steps.check_phpcs.outputs.exists == 'true'
+        run: |
+          reviewdog \
+            -f=checkstyle \
+            -name=phpcs \
+            -reporter=github-pr-review \
+            -filter-mode=added \
+            -fail-on-error=false \
+            < "phpcs-report-${{ matrix.php-version }}.xml"
+        env:
+          REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run PHPCS full scan (push)
+        if: github.event_name != 'pull_request' && steps.check_phpcs.outputs.exists == 'true'
+        run: ./vendor/bin/phpcs --no-cache
+
+  phpstan:
+    name: Static Analysis (PHP ${{ matrix.php-version }})
+    needs: [lint-editorconfig, validate-composer]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ["8.1", "8.5"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          tools: composer
+          coverage: none
+      - name: Install dependencies
+        uses: ramsey/composer-install@v3
+        with:
+          composer-options: "--prefer-dist"
+      - name: Run PHPStan
+        run: |
+          if [ -f "phpstan.neon" ] || [ -f "phpstan.neon.dist" ]; then
+            ./vendor/bin/phpstan analyse --no-progress --error-format=github --memory-limit=1024M
+          else
+            echo "No phpstan.neon(.dist) — skipping PHPStan"
+          fi
+
+  ci:
+    name: CI Status
+    if: always()
+    needs: [lint-editorconfig, validate-composer, phpcs, phpstan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail if any required job failed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - name: All required jobs passed (or skipped)
+        run: echo "CI passed"

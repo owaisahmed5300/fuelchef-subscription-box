@@ -1,0 +1,254 @@
+name: Release Please
+
+# Runs directly on push to main (not chained off CI's workflow_run).
+#
+# Why not workflow_run["Continuous Integration"]: a release-PR merge only
+# touches CHANGELOG.md + .release-please-manifest.json, which CI ignores via
+# paths-ignore. CI is then skipped, no run is created, workflow_run never fires,
+# and release-please phase 2 (tag + GitHub release) never runs — the release
+# gets stuck. Code reaching main has already passed CI on its PR (branch
+# protection), so a second CI gate here is redundant anyway.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Run release-please
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build-artifact:
+    name: Build release artifact
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      PLUGIN_SLUG: fuelchef-subscription-box
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+
+      - name: Make scripts executable
+        run: find scripts/ -maxdepth 1 -type f -exec chmod +x {} +
+
+      # PHP 8.4 (not the 8.1 plugin floor): scoping runs on a current PHP so we can
+      # use the latest php-scoper (>= 0.18 requires PHP >= 8.2). The scoped artifact
+      # still targets 8.1 — composer resolves production deps against
+      # config.platform.php (8.1 in composer.json) regardless of runtime.
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: 8.4
+          tools: composer, wp-cli
+          coverage: none
+
+      # Install WITH dev deps so we have phpcbf, phpstan, and the wp-scoper excludes.
+      # ramsey/composer-install caches the resolved vendor/ keyed on composer.lock.
+      - name: Install Composer dependencies
+        uses: ramsey/composer-install@v3
+        with:
+          composer-options: "--prefer-dist"
+
+      # Stamp the release version (release-please tag is the source of truth) and
+      # fail loudly if the __VERSION__ token survives — a silently unstamped build
+      # would ship "Version: __VERSION__" to users.
+      - name: Update plugin version
+        env:
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          VERSION="${TAG#v}"
+          ./scripts/update-version "$VERSION"
+          # readme.txt is generated from readme.txt.tpl and must ship in the zip.
+          if [ -f readme.txt.tpl ] && [ ! -f readme.txt ]; then
+            echo "::error::readme.txt.tpl exists but readme.txt was not generated"
+            exit 1
+          fi
+          # Fail loudly if any placeholder survived stamping (would ship to users).
+          for f in "${PLUGIN_SLUG}.php" readme.txt; do
+            if [ -f "$f" ] && grep -qE '__(VERSION|TESTED_UP_TO|CHANGELOG)__' "$f"; then
+              echo "::error::Unstamped placeholder remaining in $f"
+              exit 1
+            fi
+          done
+
+      # -----------------------------------------------------------------------
+      # SCOPING LOGIC (Dynamic)
+      # -----------------------------------------------------------------------
+      - name: Check if Scoping is Required
+        id: check-scope
+        run: |
+          if [ -f "scoper.inc.php" ] && [ -x "./scripts/scope" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Scoper configuration found. Proceeding with scoped build."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "No scoper configuration found. Proceeding with standard build."
+          fi
+
+      # scripts/scope downloads + checksum-verifies its tools (php-scoper,
+      # php-cs-fixer, and the WordPress exclude lists) itself, so it works
+      # locally too. This cache just persists them between runs; the key tracks
+      # scripts/scope, so bumping any pin invalidates it. Falls back to the
+      # latest cache on hash mismatch (restore-keys) — the script verifies
+      # checksums before reusing any cached file, so a stale hit is still safe.
+      - name: Cache scoping tools
+        if: steps.check-scope.outputs.exists == 'true'
+        uses: actions/cache@v6
+        with:
+          path: scripts/.cache
+          key: scoping-tools-${{ hashFiles('scripts/scope') }}
+          restore-keys: |
+            scoping-tools-
+
+      - name: Run PHP Scoper
+        if: steps.check-scope.outputs.exists == 'true'
+        run: composer run-script scope
+
+      - name: Generate Production Dependencies (If NOT scoped)
+        if: steps.check-scope.outputs.exists == 'false'
+        run: |
+          mkdir -p release-vendor-temp
+          [ -f composer.json ] && cp composer.json release-vendor-temp/
+          [ -f composer.lock ] && cp composer.lock release-vendor-temp/
+          composer install --working-dir=release-vendor-temp --no-dev --no-interaction --prefer-dist --optimize-autoloader
+
+      # -----------------------------------------------------------------------
+      # I18N & PACKAGING
+      # -----------------------------------------------------------------------
+      - name: Generate i18n POT file
+        run: |
+          mkdir -p languages
+          wp i18n make-pot . "languages/${PLUGIN_SLUG}.pot" \
+            --domain="${PLUGIN_SLUG}" \
+            --package-name="FuelChef Subscription Box" \
+            --no-location \
+            --exclude=node_modules,vendor,vendor-prefixed,release-vendor-temp,scripts,docker,tests,.github,.git,.husky,AI,readme.txt.tpl
+
+      - name: Prepare release package
+        run: |
+          DEST="release/${PLUGIN_SLUG}"
+          mkdir -p "$DEST"
+
+          # 1. Base files
+          cp "${PLUGIN_SLUG}.php" "$DEST/"
+          [ -f readme.txt ] && cp readme.txt "$DEST/"
+          [ -f LICENSE ] && cp LICENSE "$DEST/"
+
+          # 2. Dynamic Source & Vendor folders
+          if [ "${{ steps.check-scope.outputs.exists }}" == "true" ]; then
+            [ -d src-scoped ] && cp -r src-scoped "$DEST/src"
+            [ -d vendor-prefixed ] && cp -r vendor-prefixed "$DEST/vendor-prefixed"
+          else
+            [ -d src ] && cp -r src "$DEST/src"
+            [ -d release-vendor-temp/vendor ] && cp -r release-vendor-temp/vendor "$DEST/vendor"
+          fi
+
+          # 3. Add all other standard folders
+          for dir in templates assets languages; do
+            [ -d "$dir" ] && cp -r "$dir" "$DEST/"
+          done
+
+      # -----------------------------------------------------------------------
+      # VALIDATION
+      #
+      # Formatting (php-cs-fixer + phpcbf + header normalisation) is owned by
+      # scripts/scope and already applied to src-scoped before packaging, so a
+      # manual `composer run-script scope` yields identical, release-quality
+      # code. No PHPCBF pass runs here.
+      # -----------------------------------------------------------------------
+
+      # Deliberately a looser post-scope SMOKE TEST, not the dev-time analysis.
+      # It confirms the scoped artifact loads and type-checks at a baseline; full
+      # level-8 analysis already ran in CI on the unscoped source.
+      #
+      # PHPStan has no CLI flags for bootstrap files or stubs — those are config
+      # (neon) parameters only. So we generate a minimal, dedicated config:
+      #   - bootstrapFiles: the scoped prefixed autoloader, so FuelChef_Dependencies\*
+      #     classes resolve.
+      #   - phpstan-wordpress extension + WooCommerce stubs, so unprefixed WP/WC
+      #     calls in the scoped src don't register as undefined-symbol errors.
+      #   - phpVersion 80100: analyse against the plugin's 8.1 target.
+      - name: Run PHPStan Validation on Release Artifact (Scoper Check)
+        if: steps.check-scope.outputs.exists == 'true'
+        run: |
+          # php-scoper generates scoper-autoload.php (its prefix-mapping wrapper),
+          # which in turn delegates to the inner composer autoload.php. The plugin
+          # entry file loads scoper-autoload.php — we must bootstrap the same file.
+          AUTOLOAD="${GITHUB_WORKSPACE}/release/${PLUGIN_SLUG}/vendor-prefixed/scoper-autoload.php"
+          if [ ! -x "./vendor/bin/phpstan" ] || [ ! -f "$AUTOLOAD" ]; then
+            echo "phpstan or scoped autoloader missing — skipping scoper check"
+            exit 0
+          fi
+          # Write the temp config to $RUNNER_TEMP. PHPStan resolves all paths
+          # (includes, scanFiles, bootstrapFiles, paths) relative to the config
+          # file's own directory — NOT the working directory — so every entry
+          # must be an absolute path anchored to $GITHUB_WORKSPACE.
+          CONFIG="${RUNNER_TEMP}/phpstan-release.neon"
+          {
+            echo "parameters:"
+            echo "    level: 5"
+            echo "    phpVersion: 80100"
+            echo "    paths:"
+            echo "        - ${GITHUB_WORKSPACE}/release/${PLUGIN_SLUG}/fuelchef-subscription-box.php"
+            echo "        - ${GITHUB_WORKSPACE}/release/${PLUGIN_SLUG}/src"
+            echo "    bootstrapFiles:"
+            echo "        - ${AUTOLOAD}"
+            echo "    scanFiles:"
+            echo "        - ${GITHUB_WORKSPACE}/vendor/php-stubs/woocommerce-stubs/woocommerce-stubs.php"
+            echo "        - ${GITHUB_WORKSPACE}/vendor/php-stubs/woocommerce-stubs/woocommerce-packages-stubs.php"
+            echo "includes:"
+            echo "    - ${GITHUB_WORKSPACE}/vendor/szepeviktor/phpstan-wordpress/extension.neon"
+          } > "$CONFIG"
+          ./vendor/bin/phpstan analyse \
+            --configuration="$CONFIG" \
+            --memory-limit=1024M \
+            --no-progress
+
+      # -----------------------------------------------------------------------
+      # FINAL ARCHIVE
+      # -----------------------------------------------------------------------
+      - name: Create archive and checksum
+        run: |
+          TAG="${{ needs.release-please.outputs.tag_name }}"
+          cd release
+          zip -r "${PLUGIN_SLUG}-${TAG}.zip" "${PLUGIN_SLUG}/"
+          sha256sum "${PLUGIN_SLUG}-${TAG}.zip" > checksums.txt
+
+      # --clobber allows re-runs: if the workflow is re-triggered for the same tag
+      # (e.g., after a failed upload), gh will overwrite rather than error out.
+      - name: Upload assets to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.release-please.outputs.tag_name }}"
+          gh release upload "${TAG}" \
+            "release/${PLUGIN_SLUG}-${TAG}.zip" \
+            "release/checksums.txt" \
+            --clobber

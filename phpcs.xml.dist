@@ -1,0 +1,162 @@
+<?xml version="1.0" ?>
+<ruleset name="WordPress + PSR-12">
+
+    <description>
+        PSR-12 is the source of truth for code style, formatting, and naming.
+        WordPress Coding Standards (WPCS) provide best practices for security,
+        documentation, i18n, escaping, and WordPress APIs.
+    </description>
+
+    <!-- CLI -->
+    <arg name="basepath" value="." />
+    <arg name="colors" />
+    <arg value="ps" />
+
+    <!-- File extensions -->
+    <arg name="extensions" value="php" />
+
+    <file>./fuelchef-subscription-box.php</file>
+    <directory>src</directory>
+    <directory>templates</directory>
+
+    <!-- ====================================================== -->
+    <!-- PSR-12 IS THE PRIMARY STYLE GUIDE                       -->
+    <!-- ====================================================== -->
+
+    <rule ref="PSR12">
+        <!-- Plugin entry point inherently mixes declarations and side effects -->
+        <exclude name="PSR1.Files.SideEffects" />
+    </rule>
+
+    <!-- ====================================================== -->
+    <!-- WORDPRESS CODING STANDARDS                               -->
+    <!--    WordPress-Extra includes everything from              -->
+    <!--    WordPress-Core (security, DB, PHP, WP APIs) plus      -->
+    <!--    additional best-practice sniffs (PrefixAllGlobals,    -->
+    <!--    EscapeOutput, NonceVerification, etc.).              -->
+    <!--                                                        -->
+    <!--    WordPress-Docs provides docblock requirements.       -->
+    <!--                                                        -->
+    <!--    Only sniff categories that truly conflict with       -->
+    <!--    PSR-12 are excluded below. WP-specific best          -->
+    <!--    practices (YodaConditions, PrefixAllGlobals, DB      -->
+    <!--    prepared queries, etc.) are retained.                -->
+    <!-- ====================================================== -->
+
+    <rule ref="WordPress-Extra">
+        <!--
+            KEPT (non-conflicting) — everything except what is
+            explicitly excluded below. This includes:
+
+            WordPress.DB.*              Prepared SQL, restricted functions
+            WordPress.PHP.*             YodaConditions, StrictInArray, TypeCasts, NoSilencedErrors
+            WordPress.Security.*        EscapeOutput, NonceVerification, SafeRedirect
+            WordPress.WP.*              I18n, EnqueuedResources, GlobalVariablesOverride, Deprecated*
+            WordPress.NamingConventions  PrefixAllGlobals, ValidHookName, ValidPostTypeSlug
+            CodeAnalysis.*              EscapedNotTranslated, AssignmentInTernaryCondition
+        -->
+
+        <!-- Formatting: WordPress.WhiteSpace, WordPress.Arrays -->
+        <exclude name="WordPress.WhiteSpace" />
+        <exclude name="WordPress.Arrays" />
+
+        <!-- Enforce Short arrays -->
+        <exclude name="Universal.Arrays.DisallowShortArraySyntax" />
+
+        <!-- File naming: PSR-4 autoloading (Plugin.php → class Plugin) -->
+        <exclude name="WordPress.Files.FileName" />
+
+        <!-- Naming conventions: PSR-12 uses camelCase for methods/vars -->
+        <exclude name="WordPress.NamingConventions.ValidFunctionName" />
+        <exclude name="WordPress.NamingConventions.ValidVariableName" />
+
+        <!-- Indentation: PSR-12 uses 4-space indentation, not tabs -->
+        <exclude name="Generic.WhiteSpace.DisallowSpaceIndent" />
+        <exclude name="Generic.WhiteSpace.ScopeIndent" />
+
+        <!-- Class braces: PSR-12 places braces on the next line -->
+        <exclude name="Generic.Classes.OpeningBraceSameLine" />
+
+        <!-- Function braces: PSR-12 handles placement -->
+        <exclude
+            name="Generic.Functions.OpeningFunctionBraceKernighanRitchie"
+        />
+
+        <!-- Statement alignment: PSR-12 does not enforce -->
+        <exclude name="Generic.Formatting.MultipleStatementAlignment" />
+
+        <!-- Function call signatures: PSR-12 handles -->
+        <exclude name="PEAR.Functions.FunctionCallSignature" />
+
+        <!-- Multi-line declarations: PSR-12 handles -->
+        <exclude name="Squiz.Functions.MultiLineFunctionDeclaration" />
+
+        <!-- Control structure signatures: PSR-12 handles -->
+        <exclude name="Squiz.ControlStructures.ControlSignature" />
+
+        <!-- Closing braces: PSR-12 handles -->
+        <exclude name="Squiz.WhiteSpace.ScopeClosingBrace" />
+    </rule>
+
+    <!-- ====================================================== -->
+    <!-- WORDPRESS DOCS                                          -->
+    <!-- ====================================================== -->
+
+    <rule ref="WordPress-Docs">
+        <!--
+            @package is a legacy phpDocumentor grouping tag that adds no value
+            for a PSR-4, namespaced plugin (the namespace already conveys it).
+            Drop the requirement so file docblocks stay lean.
+        -->
+        <exclude name="Squiz.Commenting.FileComment.MissingPackageTag" />
+    </rule>
+
+    <!-- ====================================================== -->
+    <!-- WORDPRESS HOOK NAMING                                   -->
+    <!--    Allow slash (/) as a valid hook name delimiter for   -->
+    <!--    namespaced hooks like fuelchef_/hook_name.     -->
+    <!-- ====================================================== -->
+
+    <rule ref="WordPress.NamingConventions.ValidHookName">
+        <properties>
+            <property name="additionalWordDelimiters" type="string">/</property>
+        </properties>
+    </rule>
+
+    <!-- ====================================================== -->
+    <!-- WORDPRESS GLOBAL PREFIX                                 -->
+    <!--    Ensure all globally-scoped functions, hooks, and     -->
+    <!--    variables are prefixed with fuelchef_.                -->
+    <!-- ====================================================== -->
+
+    <rule ref="WordPress.NamingConventions.PrefixAllGlobals">
+        <properties>
+            <property name="prefixes" type="array">
+                <element value="fuelchef_" />
+            </property>
+        </properties>
+        <!-- PSR-4 namespaces don't require WordPress-style prefixes -->
+        <exclude
+            name="WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedNamespaceFound"
+        />
+    </rule>
+
+    <!-- ====================================================== -->
+    <!-- WORDPRESS I18N                                          -->
+    <!-- ====================================================== -->
+
+    <rule ref="WordPress.WP.I18n">
+        <properties>
+            <property name="text_domain" type="array">
+                <element value="fuelchef-subscription-box" />
+            </property>
+        </properties>
+    </rule>
+
+    <!-- ====================================================== -->
+    <!-- ADDITIONAL GENERIC RULES (compatible with PSR-12)       -->
+    <!-- ====================================================== -->
+
+    <rule ref="Generic.Arrays.DisallowLongArraySyntax" />
+
+</ruleset>

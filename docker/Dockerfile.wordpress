@@ -1,0 +1,80 @@
+# syntax=docker/dockerfile:1.7
+
+# ------------------------------------------------------------------
+# Build args (override at build time if needed)
+# ------------------------------------------------------------------
+ARG WORDPRESS_BASE=wordpress:php8.3-apache
+ARG COMPOSER_VERSION=2
+ARG NODE_MAJOR=20
+
+# ------------------------------------------------------------------
+# Composer stage — pinned to a major via the official image.
+# A dedicated stage avoids ARG-expansion-in-COPY--from pitfalls
+# across different BuildKit versions.
+# ------------------------------------------------------------------
+FROM composer:${COMPOSER_VERSION} AS composer-ext
+
+# ------------------------------------------------------------------
+# Main WordPress stage
+# ------------------------------------------------------------------
+FROM ${WORDPRESS_BASE}
+
+ARG COMPOSER_VERSION
+ARG NODE_MAJOR
+ARG DEBIAN_FRONTEND=noninteractive
+
+ENV COMPOSER_ALLOW_SUPERUSER=1
+
+# ------------------------------------------------------------------
+# System packages + Node.js (via NodeSource).
+# Uses BuildKit cache mounts so apt downloads survive rebuilds.
+# The base wordpress image already provides bcmath, exif, gd, intl,
+# mysqli, opcache, and zip — we only add what's missing for dev.
+# ------------------------------------------------------------------
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gnupg \
+        git \
+        unzip \
+        zip \
+        jq \
+        default-mysql-client \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+        | tee /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# ------------------------------------------------------------------
+# Composer — copied from the dedicated stage above.
+# ------------------------------------------------------------------
+COPY --from=composer-ext /usr/bin/composer /usr/bin/composer
+
+# ------------------------------------------------------------------
+# WP-CLI as a single-layer add
+# ------------------------------------------------------------------
+RUN curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp \
+    && chmod +x /usr/local/bin/wp
+
+# ------------------------------------------------------------------
+# Apache: enable mod_rewrite (WP permalinks) and pipe logs to stdout/err
+# so `./scripts/docker logs wordpress` shows everything.
+# ------------------------------------------------------------------
+RUN a2enmod rewrite \
+    && ln -sf /dev/stdout /var/log/apache2/access.log \
+    && ln -sf /dev/stderr /var/log/apache2/error.log
+
+# ------------------------------------------------------------------
+# Container-level healthcheck (compose can still override).
+# ------------------------------------------------------------------
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=5 \
+    CMD curl -fsS http://localhost/ >/dev/null || exit 1
+
+WORKDIR /var/www/html

@@ -1,0 +1,293 @@
+#!/bin/bash
+#
+# Scopes the plugin's PHP dependencies (and src) under a private namespace prefix
+# so they can't collide with other plugins. Produces ./vendor-prefixed and
+# ./src-scoped.
+#
+# php-scoper is acquired automatically (see resolve_php_scoper below) — pinned to
+# a known version and checksum-verified — so this works identically locally and
+# in CI. Run via `composer run-script scope`.
+#
+# Note: php-scoper >= 0.18 requires PHP >= 8.2. The *scoped output* still targets
+# the plugin's PHP 8.1 floor (production deps are resolved against
+# config.platform.php in composer.json), so it is safe to run scoping on a newer
+# PHP than the plugin supports.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
+
+# ---------------------------------------------------------------------------
+# php-scoper pin. Bump both values together when upgrading: grab the SHA256 from
+# the GitHub release page or run `sha256sum php-scoper.phar` on the download.
+# ---------------------------------------------------------------------------
+PHP_SCOPER_VERSION="${PHP_SCOPER_VERSION:-0.18.19}"
+PHP_SCOPER_SHA256="${PHP_SCOPER_SHA256:-170fb84bd3390defb30f99f7dc39c9a89d10c29973accc26f31c00abc5b25933}"
+# Cache dir is .gitignored and reused locally + restored from cache in CI.
+PHP_SCOPER_CACHE_DIR="${PHP_SCOPER_CACHE_DIR:-$SCRIPT_DIR/.cache}"
+
+# Path to the php-scoper binary, resolved by resolve_php_scoper().
+PHP_SCOPER_BIN="${PHP_SCOPER_BIN:-}"
+
+# ---------------------------------------------------------------------------
+# PHP CS Fixer pin. php-scoper reprints files through nikic/php-parser, which
+# drops blank lines and makes the scoped src dense/unreadable. PHP CS Fixer runs
+# afterwards purely to restore blank-line readability (PHPCBF/PSR-12 cannot add
+# blank lines before statements). Bump version + SHA256 together when upgrading.
+# ---------------------------------------------------------------------------
+PHP_CS_FIXER_VERSION="${PHP_CS_FIXER_VERSION:-3.95.10}"
+PHP_CS_FIXER_SHA256="${PHP_CS_FIXER_SHA256:-feb10626da0140eb604857d41008e8b84620d93342f037a3b6f9d20bc53f3cb7}"
+PHP_CS_FIXER_BIN="${PHP_CS_FIXER_BIN:-}"
+
+# ---------------------------------------------------------------------------
+# WordPress symbol excludes (sniccowp/php-scoper-wordpress-excludes). Downloaded
+# on demand rather than carried as a Composer dev dependency, so non-scoping
+# installs (CI lint, local dev) stay lean. Pin the version + a SHA256 per file.
+# To bump: change the version and refresh the three hashes from the new tag.
+# ---------------------------------------------------------------------------
+WP_EXCLUDES_VERSION="${WP_EXCLUDES_VERSION:-6.9.1}"
+WP_EXCLUDES_DIR="${WP_EXCLUDES_DIR:-$PHP_SCOPER_CACHE_DIR/wp-excludes-$WP_EXCLUDES_VERSION}"
+# "filename:sha256" — one per line.
+WP_EXCLUDES_FILES="
+exclude-wordpress-classes.json:5d6e59869edb5bf66205ca7528a24a0e7c9834e59650865a6e4ee4df9737e79d
+exclude-wordpress-functions.json:ea4948bd66a874303ff97df77fb53d82430f05b97789028722b12b304e68a236
+exclude-wordpress-constants.json:97b094c4383175382a73ccb2091757aba0abd7dd08ab6b4c13bc22a5737949a8
+"
+
+# Downloads $1 (url) to $2 (path) using whichever fetcher is available.
+download_file() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL -o "$2" "$1"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$2" "$1"
+  else
+    echo "Error: need curl or wget to download files." >&2
+    exit 1
+  fi
+}
+
+# Verifies $1 against the pinned php-scoper SHA256. Returns non-zero on mismatch.
+verify_php_scoper() {
+  echo "${PHP_SCOPER_SHA256}  $1" | sha256sum --check --status
+}
+
+# Resolves a usable php-scoper into $PHP_SCOPER_BIN, downloading the pinned phar
+# on a cache miss. Priority:
+#   1. $PHP_SCOPER_BIN  — explicit override (must be executable).
+#   2. vendor/bin/php-scoper — if installed via Composer.
+#   3. Managed, pinned phar in $PHP_SCOPER_CACHE_DIR (download once, then reuse).
+resolve_php_scoper() {
+  if [ -n "$PHP_SCOPER_BIN" ] && [ -x "$PHP_SCOPER_BIN" ]; then
+    return
+  fi
+
+  if [ -x "$PROJECT_ROOT/vendor/bin/php-scoper" ]; then
+    PHP_SCOPER_BIN="$PROJECT_ROOT/vendor/bin/php-scoper"
+    return
+  fi
+
+  local phar="$PHP_SCOPER_CACHE_DIR/php-scoper-${PHP_SCOPER_VERSION}.phar"
+
+  # Reuse a previously-downloaded phar only if it still matches the pinned hash.
+  if [ -f "$phar" ] && verify_php_scoper "$phar"; then
+    PHP_SCOPER_BIN="$phar"
+    return
+  fi
+
+  echo "Downloading php-scoper ${PHP_SCOPER_VERSION}..."
+  mkdir -p "$PHP_SCOPER_CACHE_DIR"
+  local url="https://github.com/humbug/php-scoper/releases/download/${PHP_SCOPER_VERSION}/php-scoper.phar"
+  download_file "$url" "$phar.tmp"
+
+  if ! verify_php_scoper "$phar.tmp"; then
+    echo "Error: php-scoper checksum mismatch (expected ${PHP_SCOPER_SHA256})." >&2
+    rm -f "$phar.tmp"
+    exit 1
+  fi
+
+  chmod +x "$phar.tmp"
+  mv "$phar.tmp" "$phar"
+  PHP_SCOPER_BIN="$phar"
+}
+
+# Resolves php-cs-fixer into $PHP_CS_FIXER_BIN, downloading the pinned phar on a
+# cache miss. Same priority/verification approach as resolve_php_scoper().
+resolve_php_cs_fixer() {
+  if [ -n "$PHP_CS_FIXER_BIN" ] && [ -x "$PHP_CS_FIXER_BIN" ]; then
+    return
+  fi
+
+  if [ -x "$PROJECT_ROOT/vendor/bin/php-cs-fixer" ]; then
+    PHP_CS_FIXER_BIN="$PROJECT_ROOT/vendor/bin/php-cs-fixer"
+    return
+  fi
+
+  local phar="$PHP_SCOPER_CACHE_DIR/php-cs-fixer-${PHP_CS_FIXER_VERSION}.phar"
+
+  if [ -f "$phar" ] && echo "${PHP_CS_FIXER_SHA256}  $phar" | sha256sum --check --status; then
+    PHP_CS_FIXER_BIN="$phar"
+    return
+  fi
+
+  echo "Downloading php-cs-fixer ${PHP_CS_FIXER_VERSION}..."
+  mkdir -p "$PHP_SCOPER_CACHE_DIR"
+  local url="https://github.com/PHP-CS-Fixer/PHP-CS-Fixer/releases/download/v${PHP_CS_FIXER_VERSION}/php-cs-fixer.phar"
+  download_file "$url" "$phar.tmp"
+
+  if ! echo "${PHP_CS_FIXER_SHA256}  $phar.tmp" | sha256sum --check --status; then
+    echo "Error: php-cs-fixer checksum mismatch (expected ${PHP_CS_FIXER_SHA256})." >&2
+    rm -f "$phar.tmp"
+    exit 1
+  fi
+
+  chmod +x "$phar.tmp"
+  mv "$phar.tmp" "$phar"
+  PHP_CS_FIXER_BIN="$phar"
+}
+
+# Ensures the WordPress exclude lists exist (verified) and points $WP_EXCLUDES_DIR
+# at them. scoper.inc.php reads that env var. A local Composer install of the
+# package, if present, is preferred over downloading.
+ensure_wp_excludes() {
+  local vendor_dir="$PROJECT_ROOT/vendor/sniccowp/php-scoper-wordpress-excludes/generated"
+  if [ -f "$vendor_dir/exclude-wordpress-classes.json" ]; then
+    WP_EXCLUDES_DIR="$vendor_dir"
+    return
+  fi
+
+  mkdir -p "$WP_EXCLUDES_DIR"
+  local entry name sha dest url
+  for entry in $WP_EXCLUDES_FILES; do
+    name="${entry%%:*}"
+    sha="${entry##*:}"
+    dest="$WP_EXCLUDES_DIR/$name"
+
+    if [ -f "$dest" ] && echo "$sha  $dest" | sha256sum --check --status; then
+      continue
+    fi
+
+    url="https://raw.githubusercontent.com/sniccowp/php-scoper-wordpress-excludes/${WP_EXCLUDES_VERSION}/generated/${name}"
+    echo "Downloading $name (php-scoper-wordpress-excludes ${WP_EXCLUDES_VERSION})..."
+    download_file "$url" "$dest.tmp"
+    if ! echo "$sha  $dest.tmp" | sha256sum --check --status; then
+      echo "Error: checksum mismatch for $name (expected $sha)." >&2
+      rm -f "$dest.tmp"
+      exit 1
+    fi
+    mv "$dest.tmp" "$dest"
+  done
+}
+
+resolve_php_scoper
+echo "Using php-scoper: $PHP_SCOPER_BIN"
+
+resolve_php_cs_fixer
+echo "Using php-cs-fixer: $PHP_CS_FIXER_BIN"
+
+ensure_wp_excludes
+export WP_EXCLUDES_DIR
+echo "Using WordPress excludes: $WP_EXCLUDES_DIR"
+
+# Step 1: Clean up old artifacts
+rm -rf _deps vendor-prefixed src-scoped
+mkdir -p _deps
+cp -r ./src _deps
+
+# Step 2: Copy composer.json content (without dev/scripting parts) into _deps/composer.json
+./scripts/php -r '
+$composer = json_decode(file_get_contents("composer.json"), true);
+unset($composer["autoload-dev"], $composer["require-dev"], $composer["scripts"], $composer["post-install-cmd"], $composer["post-update-cmd"]);
+file_put_contents("_deps/composer.json", json_encode($composer, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+'
+
+# Step 3: Run composer install in _deps
+cd _deps
+"$PROJECT_ROOT/scripts/composer" install --no-dev --no-interaction --prefer-dist --optimize-autoloader --working-dir=_deps
+
+# Step 4: Run php-scoper to add prefix
+cp ../scoper.inc.php .
+
+# Run scoper. It will scope everything defined in scoper.inc.php (which should include src and vendor)
+SCOPER_REL="${PHP_SCOPER_BIN#"$PROJECT_ROOT"/}"
+"$PROJECT_ROOT/scripts/php" "./$SCOPER_REL" add-prefix \
+    --working-dir="./_deps" \
+    --output-dir="./build" \
+    --force
+
+
+
+# Step 4b: Generate autoload for the prefixed files
+"$PROJECT_ROOT/scripts/composer" dump-autoload --working-dir=_deps/build --classmap-authoritative
+
+# ---------------------------------------------------------------------------
+# Steps 4c–4e finalise formatting of the scoped src, so a manual `composer
+# run-script scope` already produces release-quality code in the build folder
+# (this is intentionally NOT left to the release workflow). The pipeline order
+# matters and must not be reshuffled:
+#
+#   4c php-cs-fixer  — restores blank-line readability php-scoper strips out.
+#   4d phpcbf        — applies the project's WPCS/PSR-12 ruleset (Yoda, array
+#                      bracket spacing, quote style) so scoped src matches the
+#                      hand-written src style exactly.
+#   4e normalize     — hugs the file docblock to <?php (see normalize-header.php).
+#
+# Each step's output survives the next: phpcbf preserves the blank lines
+# php-cs-fixer adds, and the header normaliser runs last so nothing undoes it.
+# ---------------------------------------------------------------------------
+
+# Step 4c: Restore blank-line readability that php-scoper's reprint strips out.
+#
+# php-scoper uses nikic/PHP-Parser's pretty-printer, which normalises ALL
+# whitespace and removes every blank line. The rule set lives in
+# .php-cs-fixer.dist.php (a narrow @PSR12 + blank-line set, NOT @Symfony — see
+# that file for why).
+#
+# The scoped dir is passed as a positional PATH (with --path-mode=override) so
+# it overrides the config's Finder. This must NOT rely on PHP_CS_FIXER_TARGET:
+# scripts/php runs php inside Docker via `docker exec`, which does not forward
+# host env vars, so the config's Finder would silently fall back to ./src (the
+# unscoped source) and build/src would never be formatted.
+#
+# Kept non-fatal: a formatting hiccup must never abort a release; the scoped
+# code is already syntactically valid, just visually dense.
+if [ -d "build/src" ]; then
+    FIXER_REL="${PHP_CS_FIXER_BIN#"$PROJECT_ROOT"/}"
+    "$PROJECT_ROOT/scripts/php" "./$FIXER_REL" fix "./_deps/build/src" \
+        --config="./.php-cs-fixer.dist.php" \
+        --path-mode=override \
+        --using-cache=no \
+        --no-interaction \
+        --quiet || echo "::warning::php-cs-fixer formatting failed; shipping scoped src as-is"
+fi
+
+# Step 4d: Apply the project's WPCS / PSR-12 ruleset to the scoped src.
+#
+# Use the top-level dev install (which has phpcbf + the WPCS standard) and the
+# project ruleset explicitly — note the CWD here is _deps, which has neither.
+# basepath="." in phpcs.xml.dist resolves to _deps, and build/src lives under
+# it, so the relative target is correct. phpcbf returns 1 when it successfully
+# fixes files; `|| true` keeps that from aborting the release.
+if [ -x "$PROJECT_ROOT/vendor/bin/phpcbf" ] && [ -f "$PROJECT_ROOT/phpcs.xml.dist" ] && [ -d "build/src" ]; then
+    echo "Running phpcbf on scoped source to finalize formatting..."
+    PHPCS_BIN="$PROJECT_ROOT/vendor/bin/phpcbf"
+    PHPCS_REL="${PHPCS_BIN#"$PROJECT_ROOT"/}"
+    "$PROJECT_ROOT/scripts/php" "./$PHPCS_REL" --standard="./phpcs.xml.dist" "./_deps/build/src" || true
+fi
+
+# Step 4e: Hug the file docblock to the opening tag. No php-cs-fixer/phpcbf rule
+# can express this, so it runs last and deterministically.
+if [ -d "build/src" ]; then
+    "$PROJECT_ROOT/scripts/php" "./scripts/normalize-header.php" "./_deps/build/src"
+fi
+
+# Step 5: Extract both vendor AND src from build output
+cd ..
+cp -r _deps/build/vendor vendor-prefixed
+cp -r _deps/build/src src-scoped  # Scoped source for distribution
+
+# Step 6: Remove temp folder
+rm -rf _deps
+
+echo "Done. Prefixed vendor → vendor-prefixed/  |  Scoped src → src-scoped/"

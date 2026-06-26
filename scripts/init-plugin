@@ -1,0 +1,265 @@
+#!/bin/bash
+set -e
+
+echo "=================================================="
+echo "      WordPress Plugin Scaffolder (init-plugin)"
+echo "=================================================="
+echo "  Configures boilerplate for a new plugin."
+
+# ---- Helper functions ----
+slug_to_prefix() { echo "$1" | tr '-' '_'; }
+slug_to_namespace() { echo "$1" | tr '-' ' ' | sed 's/\b\(.\)/\u\1/g' | tr -d ' '; }
+slug_to_name() { echo "$1" | tr '-' ' ' | sed 's/\b\(.\)/\u\1/g'; }
+php_to_phpstan() { echo "$1" | awk -F. '{printf "%d%02d00", $1, $2}'; }
+add_to_php_version() { echo "$1" | awk -F. -v offset="$2" '{printf "%s.%d", $1, $2+offset}'; }
+
+# ---- Gather input with smart defaults ----
+read -p "Plugin Slug (e.g., my-awesome-plugin): " SLUG
+
+# Derive defaults from the slug
+DEFAULT_PREFIX=$(slug_to_prefix "$SLUG")
+DEFAULT_NAMESPACE=$(slug_to_namespace "$SLUG")
+DEFAULT_PLUGIN_NAME=$(slug_to_name "$SLUG")
+DEFAULT_DEPS="${DEFAULT_NAMESPACE}_Deps"
+
+echo ""
+read -p "Plugin Name [$DEFAULT_PLUGIN_NAME]: " PLUGIN_NAME
+PLUGIN_NAME="${PLUGIN_NAME:-$DEFAULT_PLUGIN_NAME}"
+
+read -p "Function Prefix (no trailing underscore/dash) [$DEFAULT_PREFIX]: " PREFIX
+PREFIX="${PREFIX:-$DEFAULT_PREFIX}"
+
+read -p "PHP Namespace [$DEFAULT_NAMESPACE]: " NAMESPACE
+NAMESPACE="${NAMESPACE:-$DEFAULT_NAMESPACE}"
+
+read -p "Plugin Description [A WordPress/WooCommerce plugin.]: " DESCRIPTION
+DESCRIPTION="${DESCRIPTION:-A WordPress/WooCommerce plugin.}"
+
+read -p "Plugin Long Description (single line) [Extends WooCommerce with custom functionality.]: " LONG_DESCRIPTION
+LONG_DESCRIPTION="${LONG_DESCRIPTION:-Extends WooCommerce with custom functionality.}"
+
+read -p "PHP Minimum Version [8.1]: " PHP_MIN_VERSION
+PHP_MIN_VERSION="${PHP_MIN_VERSION:-8.1}"
+
+DEFAULT_DOCKER=$(add_to_php_version "$PHP_MIN_VERSION" 2)
+read -p "Docker PHP Version [$DEFAULT_DOCKER]: " PHP_DOCKER_VERSION
+PHP_DOCKER_VERSION="${PHP_DOCKER_VERSION:-$DEFAULT_DOCKER}"
+
+read -p "WordPress Minimum Version [6.0]: " WP_MIN_VERSION
+WP_MIN_VERSION="${WP_MIN_VERSION:-6.0}"
+
+read -p "Tested up to WP Version [$WP_MIN_VERSION]: " TESTED_UP_TO
+TESTED_UP_TO="${TESTED_UP_TO:-$WP_MIN_VERSION}"
+
+DEFAULT_RUNNER=$(add_to_php_version "$PHP_DOCKER_VERSION" 1)
+read -p "CI Runner PHP Version (release workflow) [$DEFAULT_RUNNER]: " PHP_RUNNER_VERSION
+PHP_RUNNER_VERSION="${PHP_RUNNER_VERSION:-$DEFAULT_RUNNER}"
+
+DEFAULT_CEILING=$(add_to_php_version "$PHP_RUNNER_VERSION" 1)
+read -p "CI PHP Ceiling Version (phpstan future-compat) [$DEFAULT_CEILING]: " PHP_CEILING_VERSION
+PHP_CEILING_VERSION="${PHP_CEILING_VERSION:-$DEFAULT_CEILING}"
+
+echo ""
+echo "--- Author & Repository ---"
+read -p "Author Name (plugin header) [WPTechnix]: " AUTHOR_NAME
+AUTHOR_NAME="${AUTHOR_NAME:-WPTechnix}"
+
+read -p "Author Email [owaisahmed5300@gmail.com]: " AUTHOR_EMAIL
+AUTHOR_EMAIL="${AUTHOR_EMAIL:-owaisahmed5300@gmail.com}"
+
+read -p "Author URI [https://wptechnix.com/]: " AUTHOR_URI
+AUTHOR_URI="${AUTHOR_URI:-https://wptechnix.com/}"
+
+read -p "Plugin URI [https://wptechnix.com/]: " PLUGIN_URI
+PLUGIN_URI="${PLUGIN_URI:-https://wptechnix.com/}"
+
+read -p "GitHub Username [owaisahmed5300]: " GITHUB_USERNAME
+GITHUB_USERNAME="${GITHUB_USERNAME:-owaisahmed5300}"
+
+echo ""
+echo "--- Ports (press Enter for defaults) ---"
+read -p "  WordPress port    [8220]: " WORDPRESS_PORT
+WORDPRESS_PORT="${WORDPRESS_PORT:-8220}"
+
+read -p "  phpMyAdmin port   [8221]: " PMA_PORT
+PMA_PORT="${PMA_PORT:-8221}"
+
+read -p "  Mailpit UI port   [8222]: " MAILPIT_UI_PORT
+MAILPIT_UI_PORT="${MAILPIT_UI_PORT:-8222}"
+
+read -p "  Mailpit SMTP port [1031]: " MAILPIT_SMTP_PORT
+MAILPIT_SMTP_PORT="${MAILPIT_SMTP_PORT:-1031}"
+
+read -p "  MySQL port        [3445]: " DB_PORT
+DB_PORT="${DB_PORT:-3445}"
+
+echo ""
+read -p "Requires PHP Scoping? (Y/n): " REQUIRE_SCOPING
+REQUIRE_SCOPING="${REQUIRE_SCOPING:-y}"
+
+SCOPED_DEPS_NAMESPACE=""
+if [[ "$REQUIRE_SCOPING" =~ ^[Yy] ]]; then
+    read -p "Scoped Vendor Namespace [$DEFAULT_DEPS]: " DEPS
+    SCOPED_DEPS_NAMESPACE="${DEPS:-$DEFAULT_DEPS}"
+fi
+
+# Computed values
+PREFIX_UPPER=$(echo "$PREFIX" | tr '[:lower:]' '[:upper:]')
+PHPSTAN_VERSION=$(php_to_phpstan "$PHP_MIN_VERSION")
+
+echo ""
+echo "=================================================="
+echo "            Rename Summary"
+echo "=================================================="
+echo "Plugin Name:          $PLUGIN_NAME"
+echo "Slug:                 $SLUG"
+echo "Prefix:               $PREFIX"
+echo "Namespace:            $NAMESPACE"
+echo "Description:          $DESCRIPTION"
+echo "Min PHP:              $PHP_MIN_VERSION"
+echo "PHPStan:              $PHPSTAN_VERSION"
+echo "Docker PHP:           $PHP_DOCKER_VERSION"
+echo "Runner PHP:           $PHP_RUNNER_VERSION"
+echo "Ceiling PHP:          $PHP_CEILING_VERSION"
+echo "Min WP:               $WP_MIN_VERSION"
+echo "Tested up to:         $TESTED_UP_TO"
+echo "Author:               $AUTHOR_NAME"
+echo "Author URI:           $AUTHOR_URI"
+echo "Plugin URI:           $PLUGIN_URI"
+echo "GitHub:               $GITHUB_USERNAME"
+echo "Ports:                WP=$WORDPRESS_PORT PMA=$PMA_PORT MP=$MAILPIT_UI_PORT/$MAILPIT_SMTP_PORT DB=$DB_PORT"
+echo "Scoping:              $REQUIRE_SCOPING"
+if [[ "$REQUIRE_SCOPING" =~ ^[Yy] ]]; then
+    echo "Scoped Namespace:     $SCOPED_DEPS_NAMESPACE"
+fi
+echo ""
+
+read -p "Proceed with renaming? (y/n): " PROCEED
+
+if [ "$PROCEED" != "y" ]; then
+    echo "Aborted."
+    exit 0
+fi
+
+echo ""
+echo "Processing files..."
+
+# Safe find-replace: passes values via env vars to avoid Perl special-character
+# issues (delimiter collision, @ interpolation, etc.). \Q...\E quotes the search
+# pattern so regex metacharacters are treated literally.
+replace_all() {
+    local search="$1" replace="$2"
+    export SEARCH_STR REPLACE_STR
+    SEARCH_STR="$search" REPLACE_STR="$replace"
+    find . -type f \
+        -not -path "*/.git/*" \
+        -not -path "*/node_modules/*" \
+        -not -path "*/vendor/*" \
+        -not -path "*/vendor-prefixed/*" \
+        -not -name "init-plugin" \
+        -exec perl -pi -e 's/\Q$ENV{SEARCH_STR}\E/$ENV{REPLACE_STR}/g' {} +
+}
+
+# Version tokens (__VERSION__, __CHANGELOG__) are omitted intentionally —
+# they are reserved for scripts/update-version, which stamps them during the
+# GitHub release workflow (release-please). init-plugin only handles static
+# configuration. (__TESTED_UP_TO__ is replaced here as a static token.)
+
+# ------------------------------------------------------------------
+# STEP 1: Replace __TOKEN__ placeholders (unique, safe to do broadly)
+# ------------------------------------------------------------------
+echo "  [1/6] Replacing configuration tokens..."
+
+replace_all "__PHP_MIN_VERSION__" "$PHP_MIN_VERSION"
+replace_all "__PHP_DOCKER_VERSION__" "$PHP_DOCKER_VERSION"
+replace_all "__PHPSTAN_VERSION__" "$PHPSTAN_VERSION"
+replace_all "__WP_MIN_VERSION__" "$WP_MIN_VERSION"
+replace_all "__TESTED_UP_TO__" "$TESTED_UP_TO"
+replace_all "__PHP_RUNNER_VERSION__" "$PHP_RUNNER_VERSION"
+replace_all "__PHP_CEILING_VERSION__" "$PHP_CEILING_VERSION"
+replace_all "__WORDPRESS_PORT__" "$WORDPRESS_PORT"
+replace_all "__PMA_PORT__" "$PMA_PORT"
+replace_all "__MAILPIT_UI_PORT__" "$MAILPIT_UI_PORT"
+replace_all "__MAILPIT_SMTP_PORT__" "$MAILPIT_SMTP_PORT"
+replace_all "__DB_PORT__" "$DB_PORT"
+replace_all "__GITHUB_USERNAME__" "$GITHUB_USERNAME"
+replace_all "__AUTHOR_NAME__" "$AUTHOR_NAME"
+replace_all "__AUTHOR_EMAIL__" "$AUTHOR_EMAIL"
+replace_all "__AUTHOR_URI__" "$AUTHOR_URI"
+replace_all "__PLUGIN_URI__" "$PLUGIN_URI"
+replace_all "__DESCRIPTION__" "$DESCRIPTION"
+replace_all "__LONG_DESCRIPTION__" "$LONG_DESCRIPTION"
+
+# ------------------------------------------------------------------
+# STEP 2: Replace core boilerplate tokens
+# ------------------------------------------------------------------
+echo "  [2/6] Replacing boilerplate tokens..."
+
+replace_all "plugin-slug-placeholder" "$SLUG"
+replace_all "plugin_prefix_" "${PREFIX}_"
+replace_all "PluginNamespacePlaceholder" "$NAMESPACE"
+replace_all "PLUGIN_PREFIX_UPPER_" "${PREFIX_UPPER}_"
+replace_all "Plugin Name Placeholder" "$PLUGIN_NAME"
+
+if [[ "$REQUIRE_SCOPING" =~ ^[Yy] ]]; then
+    replace_all "PluginDependenciesPlaceholder" "$SCOPED_DEPS_NAMESPACE"
+fi
+
+# ------------------------------------------------------------------
+# STEP 3: Targeted replacements in docker / infrastructure files
+# ------------------------------------------------------------------
+echo "  [3/6] Updating Docker resource names..."
+
+export SLUG_VAL="$SLUG"
+
+# Docker container / network / volume names: plugin-slug-* → $SLUG-*
+perl -pi -e 's/plugin-slug-/$ENV{SLUG_VAL}-/g' docker/docker-compose.yml
+
+# php.ini filename reference in compose + ini file
+perl -pi -e 's/zz-plugin-slug\.ini/zz-$ENV{SLUG_VAL}.ini/g' docker/docker-compose.yml
+perl -pi -e 's/zz-plugin-slug\.ini/zz-$ENV{SLUG_VAL}.ini/g' docker/php.ini
+
+# ------------------------------------------------------------------
+# STEP 4: Rename the main plugin file
+# ------------------------------------------------------------------
+echo "  [4/6] Renaming plugin entry point..."
+
+if [ -f "plugin-slug-placeholder.php" ]; then
+    mv plugin-slug-placeholder.php "$SLUG.php"
+fi
+
+# ------------------------------------------------------------------
+# STEP 5: Handle .env (copy from .env.example if not present)
+# ------------------------------------------------------------------
+echo "  [5/6] Setting up docker/.env..."
+
+if [ ! -f "docker/.env" ]; then
+    cp docker/.env.example docker/.env
+    echo "      docker/.env created from .env.example"
+else
+    echo "      docker/.env already exists — skipped"
+fi
+
+# ------------------------------------------------------------------
+# STEP 6: Handle conditional removal (scoping files)
+# ------------------------------------------------------------------
+if [[ ! "$REQUIRE_SCOPING" =~ ^[Yy] ]]; then
+    echo "  [6/6] Removing scoping files (not required)..."
+    rm -f scoper.inc.php
+    rm -f scripts/scope
+    echo "      scoper.inc.php and scripts/scope removed"
+else
+    echo "  [6/6] Scoping files preserved"
+fi
+
+echo ""
+echo "=================================================="
+echo "    Rename complete for $PLUGIN_NAME"
+echo "=================================================="
+echo ""
+echo "Next steps:"
+echo "  ./scripts/docker up"
+echo "  ./scripts/docker composer install"
+echo "  ./scripts/docker npm install"
+echo ""
+echo "Then open http://localhost:${WORDPRESS_PORT} to complete WP setup."

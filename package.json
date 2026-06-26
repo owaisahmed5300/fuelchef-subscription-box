@@ -1,0 +1,32 @@
+{
+  "name": "fuelchef-subscription-box",
+  "description": "Development tooling (commit linting, hooks) for the FuelChef Subscription Box WordPress plugin.",
+  "private": true,
+  "license": "GPL-2.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/owaisahmed5300/fuelchef-subscription-box.git"
+  },
+  "bugs": {
+    "url": "https://github.com/owaisahmed5300/fuelchef-subscription-box/issues"
+  },
+  "homepage": "https://github.com/owaisahmed5300/fuelchef-subscription-box#readme",
+  "scripts": {
+    "prepare": "husky",
+    "commitlint": "commitlint --edit"
+  },
+  "commitlint": {
+    "extends": [
+      "@commitlint/config-conventional"
+    ]
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^20.1.0",
+    "@commitlint/config-conventional": "^21.0.2",
+    "husky": "^9.1.7"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  }
+}

@@ -1,0 +1,53 @@
+#!/bin/bash
+set -e
+
+# Do not run on CI environments (e.g., GitHub Actions)
+if [ "$CI" = "true" ]; then
+  echo "CI environment detected. Skipping pre-push checks."
+  exit 0
+fi
+
+# Get list of files being pushed (comparing against remote)
+# This gets files that have changed since the remote branch
+remote_ref="${1:-origin/$(git rev-parse --abbrev-ref HEAD)}"
+changed_files=$(git diff --name-only --diff-filter=d "$remote_ref" 2>/dev/null || git diff --name-only --diff-filter=d HEAD~1)
+
+# Early exit if no PHP files are being pushed
+if ! echo "$changed_files" | grep -qE '\.php$'; then
+  echo "No PHP files changed. Skipping pre-push checks."
+  exit 0
+fi
+
+# Check if ./scripts/composer exists and Docker is installed
+if [ -f "./scripts/composer" ] && command -v docker >/dev/null 2>&1; then
+  COMPOSER_CMD="./scripts/composer"
+elif command -v composer >/dev/null 2>&1; then
+  COMPOSER_CMD="composer"
+else
+  echo "Error: Neither ./scripts/composer (with Docker installed) nor a global 'composer' command is available."
+  echo "Install Docker (recommended) or PHP+Composer to run pre-push checks."
+  exit 1
+fi
+
+# Ensure vendor is available
+if [ ! -d "vendor" ]; then
+  echo "Vendor directory not found. Running composer install..."
+  $COMPOSER_CMD install --no-interaction --prefer-dist --no-progress
+fi
+
+# Run checks — pre-push runs less frequently, so we run the full validation suite
+echo ""
+echo "========== Pre-push checks =========="
+echo ""
+
+echo "Running phpcs (coding standards)..."
+$COMPOSER_CMD phpcs
+echo "phpcs passed."
+echo ""
+
+echo "Running phpstan (static analysis)..."
+$COMPOSER_CMD phpstan
+echo "phpstan passed."
+echo ""
+
+echo "========== All pre-push checks passed =========="

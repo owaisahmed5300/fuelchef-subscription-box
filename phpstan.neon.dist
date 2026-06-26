@@ -1,0 +1,19 @@
+parameters:
+    level: 8
+    phpVersion: 80100
+    paths:
+        - fuelchef-subscription-box.php
+        - src
+    scanFiles:
+        - vendor/php-stubs/woocommerce-stubs/woocommerce-stubs.php
+        - vendor/php-stubs/woocommerce-stubs/woocommerce-packages-stubs.php
+
+#    ignoreErrors:
+#        - message: '#Parameter \#1 \$query of method wpdb::prepare\(\) expects literal-string#'
+
+    treatPhpDocTypesAsCertain: false
+
+includes:
+    - phar://phpstan.phar/conf/bleedingEdge.neon
+    - vendor/szepeviktor/phpstan-wordpress/extension.neon
+    - vendor/phpstan/phpstan-strict-rules/rules.neon

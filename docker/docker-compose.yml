@@ -1,0 +1,124 @@
+services:
+  # ----------------------------------------------------------------
+  # MySQL Database
+  # ----------------------------------------------------------------
+  db:
+    image: mysql:8.4
+    container_name: fuelchef-subs-box-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-wordpress}
+      MYSQL_USER: ${MYSQL_USER:-wordpress}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-wordpress}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --innodb-buffer-pool-size=256M
+    volumes:
+      - db_data:/var/lib/mysql
+    ports:
+      - "${DB_PORT:-3445}:3306"
+    healthcheck:
+      test: mysqladmin ping -h 127.0.0.1 -u root -p"$$MYSQL_ROOT_PASSWORD" || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    networks:
+      - fuelchef-network
+
+  # ----------------------------------------------------------------
+  # WordPress with development tools
+  # ----------------------------------------------------------------
+  wordpress:
+    build:
+      context: .
+      dockerfile: Dockerfile.wordpress
+      args:
+        WORDPRESS_BASE: wordpress:php8.3-apache
+        COMPOSER_VERSION: "${COMPOSER_VERSION:-2}"
+        NODE_MAJOR: "${NODE_MAJOR:-20}"
+    image: fuelchef/wordpress-dev:latest
+    container_name: fuelchef-subs-box-wordpress
+    restart: unless-stopped
+    init: true
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: ${MYSQL_USER:-wordpress}
+      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD:-wordpress}
+      WORDPRESS_DB_NAME: ${MYSQL_DATABASE:-wordpress}
+      WORDPRESS_DEBUG: 1
+      WORDPRESS_CONFIG_EXTRA: |
+        define('WP_DEBUG_LOG', true);
+        define('WP_DEBUG_DISPLAY', false);
+        define('SCRIPT_DEBUG', true);
+        define('WP_ENVIRONMENT_TYPE', 'local');
+        define('WP_MEMORY_LIMIT', '256M');
+    volumes:
+      # Only the plugin source is mounted from the host. WP core stays in the
+      # image — this keeps host I/O fast on Windows/macOS.
+      - ../:/var/www/html/wp-content/plugins/fuelchef-subscription-box
+      - ./php.ini:/usr/local/etc/php/conf.d/zz-fuelchef.ini:ro
+    tmpfs:
+      - /tmp
+    ports:
+      - "${WORDPRESS_PORT:-8220}:80"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    networks:
+      - fuelchef-network
+
+  # ----------------------------------------------------------------
+  # phpMyAdmin
+  # ----------------------------------------------------------------
+  phpmyadmin:
+    image: phpmyadmin:5.2-apache
+    container_name: fuelchef-subs-box-phpmyadmin
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PMA_HOST: db
+      PMA_PORT: 3306
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      UPLOAD_LIMIT: 256M
+    ports:
+      - "${PMA_PORT:-8221}:80"
+    networks:
+      - fuelchef-network
+
+  # ----------------------------------------------------------------
+  # Mailpit — modern, actively-maintained mail catcher
+  # (replaces the unmaintained mailhog/mailhog image)
+  # ----------------------------------------------------------------
+  mailpit:
+    image: axllent/mailpit:v1.21
+    container_name: fuelchef-subs-box-mailpit
+    restart: unless-stopped
+    environment:
+      MP_MAX_MESSAGES: 5000
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    ports:
+      - "${MAILPIT_UI_PORT:-8222}:8025" # Web UI
+      - "${MAILPIT_SMTP_PORT:-1031}:1025" # SMTP
+    networks:
+      - fuelchef-network
+
+networks:
+  fuelchef-network:
+    name: fuelchef-network
+    driver: bridge
+
+volumes:
+  db_data:
+    name: fuelchef-db-data
