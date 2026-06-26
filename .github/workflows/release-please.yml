@@ -72,7 +72,7 @@ jobs:
       # Install WITH dev deps so we have phpcbf, phpstan, and the wp-scoper excludes.
       # ramsey/composer-install caches the resolved vendor/ keyed on composer.lock.
       - name: Install Composer dependencies
-        uses: ramsey/composer-install@v3
+        uses: ramsey/composer-install@v4
         with:
           composer-options: "--prefer-dist"
 
